@@ -140,7 +140,8 @@ int launch_sha2_main_tracegen(
     uint32_t range_checker_num_bins,
     uint32_t *d_bitwise_lookup,
     uint32_t bitwise_num_bits,
-    uint32_t timestamp_max_bits
+    uint32_t timestamp_max_bits,
+    cudaStream_t stream
 ) {
     auto [grid_size, block_size] = kernel_launch_params(trace_height, 256);
     sha2_main_tracegen<V><<<grid_size, block_size, 0, stream>>>(
@@ -172,7 +173,8 @@ int launch_sha256_main_tracegen(
     uint32_t range_checker_num_bins,
     uint32_t *d_bitwise_lookup,
     uint32_t bitwise_num_bits,
-    uint32_t timestamp_max_bits
+    uint32_t timestamp_max_bits,
+    cudaStream_t stream
 ) {
     return launch_sha2_main_tracegen<Sha256Variant>(
         d_trace,
@@ -185,7 +187,8 @@ int launch_sha256_main_tracegen(
         range_checker_num_bins,
         d_bitwise_lookup,
         bitwise_num_bits,
-        timestamp_max_bits
+        timestamp_max_bits,
+        stream
     );
 }
 
@@ -200,7 +203,8 @@ int launch_sha512_main_tracegen(
     uint32_t range_checker_num_bins,
     uint32_t *d_bitwise_lookup,
     uint32_t bitwise_num_bits,
-    uint32_t timestamp_max_bits
+    uint32_t timestamp_max_bits,
+    cudaStream_t stream
 ) {
     return launch_sha2_main_tracegen<Sha512Variant>(
         d_trace,
@@ -213,7 +217,8 @@ int launch_sha512_main_tracegen(
         range_checker_num_bins,
         d_bitwise_lookup,
         bitwise_num_bits,
-        timestamp_max_bits
+        timestamp_max_bits,
+        stream
     );
 }
 }
