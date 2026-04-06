@@ -15,14 +15,18 @@
 using namespace riscv;
 using namespace sha2;
 
-// ===== MAIN CHIP KERNEL =====
+// Body shared by both the inlined (SHA-256) and outlined (SHA-512) paths.
+//
+// Marked `__forceinline__` so it always inlines into its caller; this lets us
+// share one definition while still controlling whether the work ends up in the
+// kernel's frame (SHA-256, where the kernel was already tight at 16 B stack)
+// or in a separate function frame (SHA-512, where the inlined version was
+// driving ~1.2 KiB of stack and ~1.3 KiB of spills).
 template <typename V>
-__global__ void sha2_main_tracegen(
-    Fp *trace,
-    size_t trace_height,
-    uint8_t *records,
-    size_t num_records,
-    size_t *record_offsets,
+static __device__ __forceinline__ void sha2_main_row_body(
+    RowSlice row,
+    uint32_t row_idx,
+    Sha2RecordMut<V> record,
     uint32_t ptr_max_bits,
     uint32_t *range_checker_ptr,
     uint32_t range_checker_num_bins,
@@ -30,19 +34,6 @@ __global__ void sha2_main_tracegen(
     uint32_t bitwise_num_bits,
     uint32_t timestamp_max_bits
 ) {
-    uint32_t row_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row_idx >= trace_height) {
-        return;
-    }
-
-    RowSlice row(trace + row_idx, trace_height);
-    row.fill_zero(0, sha2::Sha2MainLayout<V>::WIDTH);
-
-    if (row_idx >= num_records) {
-        return;
-    }
-
-    Sha2RecordMut<V> record(records + record_offsets[row_idx]);
     Sha2RecordHeader<V> *header = record.header;
 
     BitwiseOperationLookup bitwise_lookup(bitwise_lookup_ptr, bitwise_num_bits);
@@ -123,6 +114,95 @@ __global__ void sha2_main_tracegen(
         RowSlice base_slice = write_aux.slice_from(COL_INDEX(MemoryWriteAuxCols, base));
         mem_helper.fill(base_slice, record.write_aux[i].prev_timestamp, timestamp);
         timestamp += 1;
+    }
+}
+
+// __noinline__ wrapper used by the SHA-512 instantiation. SHA-512 has twice as
+// many memory aux iterations as SHA-256 (BLOCK_READS=32, STATE_READS=16,
+// STATE_WRITES=16) and the inlined body was producing ~1.2 KiB of stack frame
+// and ~1.3 KiB of register spills in the kernel. Outlining gives the body its
+// own stack frame and drops the kernel's footprint dramatically.
+template <typename V>
+static __device__ __noinline__ void sha2_main_row_outlined(
+    RowSlice row,
+    uint32_t row_idx,
+    Sha2RecordMut<V> record,
+    uint32_t ptr_max_bits,
+    uint32_t *range_checker_ptr,
+    uint32_t range_checker_num_bins,
+    uint32_t *bitwise_lookup_ptr,
+    uint32_t bitwise_num_bits,
+    uint32_t timestamp_max_bits
+) {
+    sha2_main_row_body<V>(
+        row,
+        row_idx,
+        record,
+        ptr_max_bits,
+        range_checker_ptr,
+        range_checker_num_bins,
+        bitwise_lookup_ptr,
+        bitwise_num_bits,
+        timestamp_max_bits
+    );
+}
+
+// ===== MAIN CHIP KERNEL =====
+template <typename V>
+__global__ void sha2_main_tracegen(
+    Fp *trace,
+    size_t trace_height,
+    uint8_t *records,
+    size_t num_records,
+    size_t *record_offsets,
+    uint32_t ptr_max_bits,
+    uint32_t *range_checker_ptr,
+    uint32_t range_checker_num_bins,
+    uint32_t *bitwise_lookup_ptr,
+    uint32_t bitwise_num_bits,
+    uint32_t timestamp_max_bits
+) {
+    uint32_t row_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row_idx >= trace_height) {
+        return;
+    }
+
+    RowSlice row(trace + row_idx, trace_height);
+    row.fill_zero(0, sha2::Sha2MainLayout<V>::WIDTH);
+
+    if (row_idx >= num_records) {
+        return;
+    }
+
+    Sha2RecordMut<V> record(records + record_offsets[row_idx]);
+    // SHA-512 routes through the __noinline__ wrapper to keep the heavy
+    // working set out of the kernel's stack frame; SHA-256 inlines the body
+    // directly because it was already register-resident at 16 B stack and
+    // outlining only added local-memory traffic.
+    if constexpr (V::WORD_BITS > 32) {
+        sha2_main_row_outlined<V>(
+            row,
+            row_idx,
+            record,
+            ptr_max_bits,
+            range_checker_ptr,
+            range_checker_num_bins,
+            bitwise_lookup_ptr,
+            bitwise_num_bits,
+            timestamp_max_bits
+        );
+    } else {
+        sha2_main_row_body<V>(
+            row,
+            row_idx,
+            record,
+            ptr_max_bits,
+            range_checker_ptr,
+            range_checker_num_bins,
+            bitwise_lookup_ptr,
+            bitwise_num_bits,
+            timestamp_max_bits
+        );
     }
 }
 

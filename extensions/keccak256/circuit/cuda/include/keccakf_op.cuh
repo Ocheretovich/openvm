@@ -49,35 +49,53 @@ __device__ __forceinline__ uint64_t rotl64(uint64_t x, int n) {
     return n ? ((x << n) | (x >> (64 - n))) : x;
 }
 
-// Compute keccak-f permutation on a 200-byte state
+// Compute keccak-f permutation on a 200-byte state.
+//
+// The body uses in-place rho/pi via the 24-element permutation cycle and an
+// in-place chi with only two temporaries per row, so this function itself needs
+// no temp[25] scratch array (used to be 200 B on the caller's stack frame).
 __device__ __forceinline__ void keccakf_permutation(uint64_t state[25]) {
+    using keccak256::RHO_PI_CYCLE_IDX;
+    using keccak256::RHO_PI_CYCLE_ROT;
+
     for (int round = 0; round < 24; round++) {
-        // Theta
+        // Theta: C[x] = xor(A[x, 0..4])
         uint64_t c[5];
+#pragma unroll 5
         for (int x = 0; x < 5; x++) {
             c[x] = state[x] ^ state[x + 5] ^ state[x + 10] ^ state[x + 15] ^ state[x + 20];
         }
+        // A'[x, y] = A[x, y] ^ D[x] where D[x] = C[x-1] ^ ROTL(C[x+1], 1).
+        // Use a scalar `d` instead of materializing D[5].
         for (int x = 0; x < 5; x++) {
             uint64_t d = c[(x + 4) % 5] ^ rotl64(c[(x + 1) % 5], 1);
+#pragma unroll 5
             for (int y = 0; y < 5; y++) {
                 state[x + 5 * y] ^= d;
             }
         }
 
-        // Rho and Pi
-        uint64_t temp[25];
-        for (int y = 0; y < 5; y++) {
-            for (int x = 0; x < 5; x++) {
-                temp[y + 5 * ((2 * x + 3 * y) % 5)] = rotl64(state[x + 5 * y], R[x][y]);
-            }
+        // Rho/Pi in place via the 24-element permutation cycle (one temp).
+        // Avoids the previous temp[25] (200 B) scratch array.
+        uint64_t temp = rotl64(state[RHO_PI_CYCLE_IDX[0]], RHO_PI_CYCLE_ROT[23]);
+        // Prevent unrolling to avoid 23 simultaneous rotations in flight.
+#pragma unroll 1
+        for (int i = 0; i < 23; i++) {
+            state[RHO_PI_CYCLE_IDX[i]] =
+                rotl64(state[RHO_PI_CYCLE_IDX[i + 1]], RHO_PI_CYCLE_ROT[i]);
         }
+        state[RHO_PI_CYCLE_IDX[23]] = temp;
 
-        // Chi
+        // Chi in place with 2 temps per row (instead of a full temp[25] copy).
         for (int y = 0; y < 5; y++) {
-            for (int x = 0; x < 5; x++) {
-                state[x + 5 * y] =
-                    temp[x + 5 * y] ^ ((~temp[(x + 1) % 5 + 5 * y]) & temp[(x + 2) % 5 + 5 * y]);
-            }
+            uint64_t *row_state = &state[5 * y];
+            uint64_t t0 = row_state[0];
+            uint64_t t1 = row_state[1];
+            row_state[0] = t0 ^ ((~t1) & row_state[2]);
+            row_state[1] = t1 ^ ((~row_state[2]) & row_state[3]);
+            row_state[2] ^= (~row_state[3]) & row_state[4];
+            row_state[3] ^= (~row_state[4]) & t0;
+            row_state[4] ^= (~t0) & t1;
         }
 
         // Iota
